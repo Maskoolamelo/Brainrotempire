@@ -1,0 +1,731 @@
+-- 📦 Servisler
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local PathfindingService = game:GetService("PathfindingService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local player = Players.LocalPlayer -- Doğrudan LocalPlayer'ı atıyoruz
+
+-- ⚙️ Ayarlar
+local TP_OFFSET = CFrame.new(0.18, 3, 5.15)
+local spamEnabled = false
+local trapRemoverEnabled = false
+local hitFromDistanceEnabled = false
+local stealableESPEnabled = false
+local lockTimerESPEnabled = false
+local mouseClickConnection = nil
+local teleportDelay = 0.2
+
+-- Varsayımsal RemoteEvent: Oyununuzdaki pet toplama/etkileşim RemoteEvent'inin yolunu buraya yazın.
+-- !!! ÖNEMLİ: Bu yolu KENDİ OYUNUNUZDAKİ DOĞRU REMOTE EVENT YOLU İLE DEĞİŞTİRİN!
+local INTERACT_REMOTE_EVENT = ReplicatedStorage:WaitForChild("CollectPetEvent", 5)
+
+-- ESP için aktif kutuları ve metinleri saklamak için tablo
+local activeESPParts = {}
+local activeLockTimerESPParts = {}
+
+-- Rayfield UI Yükleme ve Oluşturma
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+local Window = Rayfield:CreateWindow({
+    Name = "Testing Demo",
+    LoadingTitle = "Made by josie the faggot",
+    LoadingSubtitle = "By NOAH A BITCH",
+    ConfigurationSaving = {
+        Enabled = false
+    },
+    KeySystem = false
+})
+
+-- UI Sekmeleri
+local TP_Tab = Window:CreateTab("TP")
+local Combat_Tab = Window:CreateTab("Combat")
+local Helpers_Tab = Window:CreateTab("Helpers")
+local ESP_Tab = Window:CreateTab("ESP")
+
+-- ✅ Karakter parçalarını al (Genel kullanım için)
+local function getCharacterParts()
+    local char = player.Character
+    if not char then
+        -- Eğer karakter yoksa, Karakterin yüklenmesini bekle
+        char = player.CharacterAdded:Wait()
+    end
+    local hrp = char:WaitForChild("HumanoidRootPart", 5) -- HumanoidRootPart'ın yüklenmesini bekle
+    local humanoid = char:FindFirstChildWhichIsA("Humanoid")
+    if not hrp then
+        warn("ERROR: HumanoidRootPart bulunamadı.")
+    end
+    return hrp, humanoid
+end
+
+-- ✅ Log mesajlarını güncelle
+local function updateStatus(text)
+    print("🌀 [Script Status] " .. text)
+end
+
+-- ✅ Rebirth’e göre podium aralığını belirle
+local function getValidPodiumRange(rebirth)
+    rebirth = tonumber(rebirth) or 0
+    if rebirth == 0 or rebirth == 2 then return 1, 5 end
+    if rebirth == 7 or rebirth == 3 then return 6, 10 end
+    local min = math.clamp(rebirth - 1, 1, 10)
+    local max = math.clamp(rebirth + 3, 1, 10)
+    return min, max
+end
+
+-- ✅ Plot’tan oyuncunun Rebirth’ünü al (Stealable ESP için kullanılır)
+local function getRebirthForPlot(plot)
+    local sign = plot:FindFirstChild("PlotSign")
+    if not sign then return nil end
+    local gui = sign:FindFirstChild("SurfaceGui")
+    if not gui then return nil end
+    local frame = gui:FindFirstChild("Frame")
+    if not frame then return nil end
+    local label = frame:FindFirstChild("TextLabel")
+    if not (label and label:IsA("TextLabel")) then return nil end
+
+    local baseText = label.Text
+    local displayName = baseText:match("^(.-)'s Base")
+    if not displayName then return nil end
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr.DisplayName == displayName then
+            local leaderstats = plr:FindFirstChild("leaderstats")
+            if leaderstats then
+                local rebirthValue = leaderstats:FindFirstChild("Rebirths")
+                return rebirthValue and rebirthValue.Value
+            end
+        end
+    end
+    return nil -- Fazladan '}' kaldırıldı.
+end
+
+-- ✅ En yakın oyuncuyu bul (Hit From Distance için)
+local function getClosestPlayer()
+    local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+
+    local closestTarget = nil
+    local closestDist = math.huge
+
+    for _, otherPlayer in ipairs(Players:GetPlayers()) do
+        if otherPlayer ~= player and otherPlayer.Character and otherPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            local targetHrp = otherPlayer.Character.HumanoidRootPart
+            local dist = (targetHrp.Position - hrp.Position).Magnitude
+            if dist < closestDist then
+                closestDist = dist
+                closestTarget = targetHrp
+            end
+        end
+    end
+    return closestTarget
+end
+
+-- ✅ ESP Kutusu ve Metni Oluşturma (Genelleştirildi)
+local function createESPVisual(targetObject, color, text, namePrefix)
+    if not targetObject or not targetObject:IsA("BasePart") then
+        warn("ERROR: createESPVisual'a geçerli bir BasePart verilmedi! (" .. tostring(targetObject) .. ")")
+        return nil
+    end
+
+    local espBox = Instance.new("Part")
+    espBox.Name = (namePrefix or "") .. "ESPBox"
+    espBox.Size = targetObject.Size
+    espBox.CFrame = targetObject.CFrame
+    espBox.Transparency = 0.7
+    espBox.Color = color
+    espBox.CanCollide = false
+    espBox.Anchored = true
+    espBox.Parent = workspace
+
+    local highlight = Instance.new("Highlight")
+    highlight.OutlineColor = Color3.new(0, 0, 0)
+    highlight.FillTransparency = 0.5
+    highlight.OutlineTransparency = 0
+    highlight.Parent = espBox
+
+    local billboardGui = Instance.new("BillboardGui")
+    billboardGui.Name = (namePrefix or "") .. "ESPText"
+    billboardGui.Size = UDim2.new(10, 0, 4, 0)
+    billboardGui.Adornee = targetObject
+    billboardGui.AlwaysOnTop = true
+    billboardGui.ExtentsOffsetWorldSpace = Vector3.new(0, targetObject.Size.Y / 2 + 1, 0)
+    billboardGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    billboardGui.Parent = espBox
+
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Name = "ESPTextLabel"
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.BackgroundTransparency = 1
+    textLabel.TextScaled = true
+    textLabel.Text = text
+    textLabel.TextColor3 = Color3.new(1, 1, 1)
+    textLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+    textLabel.TextStrokeTransparency = 0
+    textLabel.Font = Enum.Font.SourceSansBold
+    textLabel.Parent = billboardGui
+
+    return espBox
+end
+
+-- ✅ Tüm aktif ESP kutularını ve yazılarını temizle
+local function clearESPBoxes(espTable)
+    for _, espPart in ipairs(espTable) do
+        if espPart and espPart.Parent then
+            espPart:Destroy()
+        end
+    end
+    for k in pairs(espTable) do espTable[k] = nil end
+end
+
+-- 🔁 TP Spam döngüsü (RunService.Heartbeat her frame çalışır)
+RunService.Heartbeat:Connect(function()
+    if not spamEnabled then return end
+
+    local hrp, humanoid = getCharacterParts() -- getCharacterParts() kullanımı düzeltildi
+    if not hrp or not humanoid then return end
+
+    local closestSpawn = nil
+    local closestDist = math.huge
+
+    local plotsFolder = workspace:WaitForChild("Plots", 0.1)
+    if not plotsFolder then return end
+
+    for _, plot in ipairs(plotsFolder:GetChildren()) do
+        local podiums = plot:FindFirstChild("AnimalPodiums")
+        if podiums then
+            for _, podium in ipairs(podiums:GetChildren()) do
+                local spawn = podium:FindFirstChild("Base") and podium.Base:FindFirstChild("Spawn")
+                if spawn then
+                    local dist = (spawn.Position - hrp.Position).Magnitude
+                    if dist < closestDist then
+                        closestDist = dist
+                        closestSpawn = spawn
+                    end
+                end
+            end
+        end
+    end
+
+    if closestSpawn then
+        hrp.CFrame = closestSpawn.CFrame * TP_OFFSET
+    end
+end)
+
+-- 🔁 Stealable ESP döngüsü (RunService.Heartbeat her frame çalışır)
+RunService.Heartbeat:Connect(function()
+    if not stealableESPEnabled then
+        clearESPBoxes(activeESPParts)
+        return
+    end
+
+    clearESPBoxes(activeESPParts)
+
+    local plotsFolder = workspace:WaitForChild("Plots", 1)
+    if not plotsFolder then
+        return
+    end
+
+    for _, plot in ipairs(plotsFolder:GetChildren()) do
+        local ownerRebirth = getRebirthForPlot(plot)
+        if ownerRebirth ~= nil then
+            local minIdx, maxIdx = getValidPodiumRange(ownerRebirth)
+            local podiums = plot:FindFirstChild("AnimalPodiums")
+            if podiums then
+                for i = minIdx, maxIdx do
+                    local podium = podiums:FindFirstChild(tostring(i))
+                    if podium then
+                        local decorations = podium:FindFirstChild("Base") and podium.Base:FindFirstChild("Decorations")
+                        local targetPart = decorations and decorations:FindFirstChild("Part")
+
+                        if targetPart and targetPart:IsA("BasePart") then
+                            local esp = createESPVisual(targetPart, Color3.fromRGB(0, 255, 0), "Stealable", "Stealable")
+                            if esp then table.insert(activeESPParts, esp) end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- 🔁 Lock Timer ESP döngüsü (RunService.Heartbeat her frame çalışır)
+RunService.Heartbeat:Connect(function()
+    if not lockTimerESPEnabled then
+        clearESPBoxes(activeLockTimerESPParts)
+        return
+    end
+
+    clearESPBoxes(activeLockTimerESPParts)
+
+    local plotsFolder = workspace:WaitForChild("Plots", 1)
+    if not plotsFolder then
+        return
+    end
+
+    for _, plot in ipairs(plotsFolder:GetChildren()) do
+        -- Purchases is not a valid member hatası için düzeltme:
+        -- PlotBlock'ı doğrudan plot içinde recursive olarak ara
+        local plotBlock = plot:FindFirstChild("PlotBlock", true) 
+        if plotBlock then
+            local main = plotBlock:FindFirstChild("Main")
+            if main then
+                local billboardGui = main:FindFirstChild("BillboardGui")
+                if billboardGui then
+                    local remainingTimeLabel = billboardGui:FindFirstChild("RemainingTime")
+                    if remainingTimeLabel and remainingTimeLabel:IsA("TextLabel") then
+                        local lockTimeText = remainingTimeLabel.Text
+                        
+                        local targetPartForESP = nil
+                        if main:IsA("BasePart") then
+                            targetPartForESP = main
+                        elseif plotBlock:IsA("BasePart") then
+                            targetPartForESP = plotBlock
+                        else
+                            targetPartForESP = main:FindFirstChildOfClass("BasePart")
+                        end
+
+                        if targetPartForESP and targetPartForESP:IsA("BasePart") then
+                            local esp = createESPVisual(targetPartForESP, Color3.fromRGB(255, 0, 0), lockTimeText, "LockTimer")
+                            if esp then table.insert(activeLockTimerESPParts, esp) end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- 🧹 Slide temizleme
+task.spawn(function()
+    local plotsFolder = workspace:WaitForChild("Plots", 10)
+    if not plotsFolder then
+        updateStatus("❌ 'Plots' klasörü temizleme için bulunamadı.")
+        return
+    end
+
+    for _, plot in ipairs(plotsFolder:GetChildren()) do
+        local deco = plot:FindFirstChild("Decorations")
+        local side2 = deco and deco:FindFirstChild("Side 2")
+        local folder = side2 and side2:FindFirstChild("Folder")
+        local inner = folder and folder:FindFirstChild("Side 2")
+
+        if inner then
+            for _, item in ipairs(inner:GetChildren()) do
+                if string.lower(item.Name):find("slide") then
+                    item:Destroy()
+                    updateStatus("🗑️ Silindi: " .. item:GetFullName())
+                end
+            end
+        end
+    end
+end)
+
+
+-- === Steal & Deliver Modülü ===
+local StealDeliver = {}
+StealDeliver.isProcessing = false
+StealDeliver.originalCharacter = nil
+StealDeliver.cloneCharacter = nil
+StealDeliver.prisonPlatform = nil
+StealDeliver.connections = {}
+StealDeliver._cachedMyPlot = nil
+StealDeliver.DEBUG_PRINTS_ENABLED = true
+StealDeliver.AUTO_WALK_SPEED = 50
+StealDeliver.SPEED_LOOP_DURATION = 10
+StealDeliver.FLOAT_SPEED = 45
+StealDeliver.FLOAT_HEIGHT_OFFSET = 20
+
+function StealDeliver:updateStatus(message, isImportant)
+    if self.DEBUG_PRINTS_ENABLED or isImportant then
+        print("[StealDeliver] " .. tostring(message))
+    end
+end
+
+function StealDeliver:getHRP()
+    local char = player.Character
+    if not char then
+        char = player.CharacterAdded:Wait()
+    end
+    local hrp = char:WaitForChild("HumanoidRootPart", 5)
+    if not hrp then
+        self:updateStatus("ERROR: HumanoidRootPart bulunamadı.", true)
+    end
+    return hrp
+end
+
+-- Bu fonksiyon güncellendi: DeliveryHitbox'ı plot içinde herhangi bir yerden arar.
+function StealDeliver:findDeliveryHitbox()
+    if not (self._cachedMyPlot and self._cachedMyPlot.Parent) then
+        local plotsFolder = workspace:WaitForChild("Plots", 10)
+        if not plotsFolder then
+            self:updateStatus("Hata: 'Plots' klasörü bulunamadı.", true)
+            return nil
+        end
+        for _, plot in ipairs(plotsFolder:GetChildren()) do
+            local sign = plot:FindFirstChild("PlotSign")
+            local gui = sign and sign:FindFirstChild("SurfaceGui")
+            local frame = gui and gui:FindFirstChild("Frame")
+            local label = frame and frame:FindFirstChild("TextLabel")
+            if label and label:IsA("TextLabel") then
+                local displayName = label.Text:match("^(.-)'s Base")
+                if displayName and (displayName == player.Name or displayName == player.DisplayName) then
+                    self._cachedMyPlot = plot
+                    break
+                end
+            end
+        end
+    end
+    if self._cachedMyPlot then
+        local deliveryHitbox = self._cachedMyPlot:FindFirstChild("DeliveryHitbox", true) -- Recursive arama
+        if deliveryHitbox then
+            self:updateStatus("OK: DeliveryHitbox bulundu!", true)
+            return deliveryHitbox
+        else
+            self:updateStatus("Hata: Plot bulundu ancak içinde 'DeliveryHitbox' bulunamadı.", true)
+            return nil
+        end
+    else
+        self:updateStatus("Hata: Oyuncuya ait plot bulunamadığı için DeliveryHitbox aranamıyor.", true)
+        return nil
+    end
+end
+
+function StealDeliver:ExecutePhase()
+    if self.isProcessing then return end
+    local character = player.Character
+    local humanoid, rootPart = character and character:FindFirstChildOfClass("Humanoid"), character and character:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not rootPart or humanoid:GetState() == Enum.HumanoidStateType.Dead then 
+        Rayfield:Notify({
+            Title = "Hata",
+            Content = "Karakteriniz veya HumanoidRootPart'ınız bulunamadı veya ölüsünüz.",
+            Duration = 3
+        })
+        return 
+    end
+    
+    self.isProcessing = true
+    
+    local originalCFrame = rootPart.CFrame
+    humanoid:UnequipTools(); humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+    self.prisonPlatform = Instance.new("Part", workspace); self.prisonPlatform.Anchored = true; self.prisonPlatform.CanCollide = false; self.prisonPlatform.Transparency = 1;
+    self.prisonPlatform.Size = Vector3.new(200, 1, 200); self.prisonPlatform.CFrame = CFrame.new(0, -500, 0);
+    character.Archivable = true; self.cloneCharacter = character:Clone(); character.Archivable = false
+    self.originalCharacter = character
+
+    task.defer(function()
+        self.cloneCharacter.Name = player.Name; self.cloneCharacter.Parent = workspace; self.cloneCharacter:SetPrimaryPartCFrame(originalCFrame)
+        local prisonCFrame = self.prisonPlatform.CFrame + Vector3.new(0, self.prisonPlatform.Size.Y / 2 + 2, 0)
+        self.originalCharacter:SetPrimaryPartCFrame(prisonCFrame); self.originalCharacter.Name = "Original_" .. player.Name
+        for _, part in ipairs(self.originalCharacter:GetDescendants()) do
+            if part:IsA("BasePart") then pcall(function() part:SetNetworkOwner(nil) end) end
+        end
+        player.Character = self.cloneCharacter
+        workspace.CurrentCamera.CameraSubject = self.cloneCharacter:FindFirstChildOfClass("Humanoid")
+        self.cloneCharacter:FindFirstChildOfClass("Humanoid"):ChangeState(Enum.HumanoidStateType.Running)
+
+        self.connections.lockdown = RunService.Heartbeat:Connect(function()
+            if self.originalCharacter and self.originalCharacter.Parent then self.originalCharacter:SetPrimaryPartCFrame(prisonCFrame)
+            elseif self.connections.lockdown then self.connections.lockdown:Disconnect() end
+        end)
+        self.connections.death = self.cloneCharacter:FindFirstChildOfClass("Humanoid").Died:Connect(function() self:Destroy() end)
+
+        task.spawn(function()
+            for i = 3, 1, -1 do
+                Rayfield:Notify({
+                    Title = "Steal & Deliver",
+                    Content = "Başlangıç: " .. tostring(i) .. " saniye kaldı...",
+                    Duration = 1
+                })
+                task.wait(1)
+                if not self.isProcessing then break end
+            end
+            if self.isProcessing then self:ReturnToOriginal() end
+        end)
+    end)
+end
+
+function StealDeliver:ReturnToOriginal()
+    if not self.isProcessing then return end
+    Rayfield:Notify({
+        Title = "Steal & Deliver",
+        Content = "Orijinal karaktere dönülüyor ve hedefe yüzülüyor...",
+        Duration = 2
+    })
+
+    if self.connections.lockdown then self.connections.lockdown:Disconnect() end
+    if self.connections.death then self.connections.death:Disconnect() end
+    if self.connections.speedLoop then self.connections.speedLoop:Disconnect() end
+    if self.connections.floatLoop then self.connections.floatLoop:Disconnect() end
+    self.connections = {}
+    
+    local cloneCFrame = self.cloneCharacter and self.cloneCharacter:FindFirstChild("HumanoidRootPart") and self.cloneCharacter:GetPrimaryPartCFrame()
+    
+    if self.originalCharacter and self.originalCharacter.Parent then
+        local restoredHumanoid = self.originalCharacter:FindFirstChildOfClass("Humanoid")
+        player.Character = self.originalCharacter
+        workspace.CurrentCamera.CameraSubject = restoredHumanoid
+        if cloneCFrame then self.originalCharacter:SetPrimaryPartCFrame(cloneCFrame) end
+        self.originalCharacter.Name = player.Name
+        restoredHumanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+        
+        task.spawn(function()
+            task.wait(0.5)
+            local deliveryHitbox = StealDeliver:findDeliveryHitbox()
+            if deliveryHitbox then
+                local targetPosition = deliveryHitbox.Position
+                local hrp = StealDeliver:getHRP()
+                if not hrp then return end
+
+                self:updateStatus("✅ DeliveryHitbox bulundu. Hedefe yüksekten yüzülüyor...", true)
+                
+                local startCFrame = hrp.CFrame
+                local endCFrame = CFrame.new(targetPosition + Vector3.new(0, self.FLOAT_HEIGHT_OFFSET, 0))
+
+                local distance = (startCFrame.Position - endCFrame.Position).Magnitude
+                local duration = distance / self.FLOAT_SPEED
+
+                local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+                local tween = TweenService:Create(hrp, tweenInfo, {CFrame = endCFrame})
+                
+                local originalWalkSpeed = restoredHumanoid.WalkSpeed
+                local originalJumpPower = restoredHumanoid.JumpPower
+                restoredHumanoid.WalkSpeed = self.FLOAT_SPEED
+                restoredHumanoid.JumpPower = 0
+
+                self.connections.floatLoop = RunService.Heartbeat:Connect(function()
+                    if hrp and hrp.Parent then
+                        local currentY = hrp.Position.Y
+                        local targetY = endCFrame.Position.Y
+                        local diffY = targetY - currentY
+
+                        if math.abs(diffY) > 0.1 then
+                            hrp.CFrame = hrp.CFrame + Vector3.new(0, diffY * 0.1, 0)
+                        end
+                    else
+                        if self.connections.floatLoop then self.connections.floatLoop:Disconnect() end
+                    end
+                end)
+
+                tween:Play()
+                tween.Completed:Wait()
+
+                if self.connections.floatLoop then self.connections.floatLoop:Disconnect() end
+
+                hrp.CFrame = CFrame.new(targetPosition)
+
+                restoredHumanoid.WalkSpeed = originalWalkSpeed
+                restoredHumanoid.JumpPower = originalJumpPower
+
+                self:updateStatus("✅ Hedefe başarıyla yüzüldü.", true)
+                
+                if INTERACT_REMOTE_EVENT then
+                    self:updateStatus("⚡ 'E' tuşuna basma simüle ediliyor (RemoteEvent tetikleniyor)...", true)
+                    INTERACT_REMOTE_EVENT:FireServer("StartHold")
+                    task.wait(1.7)
+                    INTERACT_REMOTE_EVENT:FireServer("EndHold")
+                    self:updateStatus("✅ 'E' tuşuna basma simülasyonu tamamlandı.", true)
+                else
+                    self:updateStatus("⚠️ RemoteEvent 'INTERACT_REMOTE_EVENT' bulunamadı. 'E' tuşu basımı simüle edilemedi.", true)
+                end
+            else
+                self:updateStatus("❌ DeliveryHitbox bulunamadı, otomatik yüzme başlatılamadı. Kodu kontrol edin.", true)
+                Rayfield:Notify({
+                    Title = "Steal & Deliver Hatası",
+                    Content = "DeliveryHitbox bulunamadı. Lütfen 'INTERACT_REMOTE_EVENT' yolunu ve oyun objesi hiyerarşisini kontrol edin.",
+                    Duration = 5
+                })
+            end
+        end)
+    end
+    
+    if self.cloneCharacter then self.cloneCharacter:Destroy() end
+    if self.prisonPlatform then self.prisonPlatform:Destroy() end
+    
+    self.originalCharacter, self.cloneCharacter, self.prisonPlatform = nil, nil, nil
+    self.isProcessing = false
+end
+
+function StealDeliver:Destroy()
+    if self.isProcessing then self:ReturnToOriginal() end
+    task.wait(0.1)
+    for _, v in pairs(self.connections) do if v.Connected then v:Disconnect() end end
+end
+
+
+-- UI Kontrolleri
+TP_Tab:CreateToggle({
+    Name = "📍 Use While you behind a pet, behind a wall",
+    CurrentValue = false,
+    Callback = function(state)
+        spamEnabled = state
+        Rayfield:Notify({
+            Title = "TP Spam",
+            Content = state and "TP Spam activated." or "TP Spam deactivated.",
+            Duration = 2
+        })
+    end
+})
+
+TP_Tab:CreateButton({
+    Name = "📦 Steal & Deliver",
+    Callback = function()
+        if StealDeliver.isProcessing then
+            Rayfield:Notify({
+                Title = "İşlem Devam Ediyor",
+                Content = "Zaten bir 'Steal & Deliver' işlemi devam ediyor.",
+                Duration = 3
+            })
+            return
+        end
+        StealDeliver:ExecutePhase()
+    end
+})
+
+-- Combat Tab Kontrolleri
+Combat_Tab:CreateToggle({
+    Name = "💥 Hit From Distance",
+    CurrentValue = false,
+    Callback = function(state)
+        hitFromDistanceEnabled = state
+        if state then
+            Rayfield:Notify({
+                Title = "Hit From Distance",
+                Content = "Hit From Distance activated. Click to teleport to the closest player after a short delay.",
+                Duration = 3
+            })
+            mouseClickConnection = UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 and not gameProcessedEvent and hitFromDistanceEnabled then
+                    local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                    if not hrp then return end
+                    local targetHrp = getClosestPlayer()
+                    if targetHrp then
+                        task.wait(teleportDelay)
+                        local targetInitialCFrame = targetHrp.CFrame
+                        local rotationDuration = 0.15
+                        local orbitDistance = 2
+                        local rotationsPerSecond = 50
+                        local startTime = tick()
+                        hrp.CFrame = targetInitialCFrame * CFrame.new(0, 0, orbitDistance)
+                        local rotationConnection
+                        rotationConnection = RunService.RenderStepped:Connect(function()
+                            local elapsedTime = tick() - startTime
+                            if elapsedTime >= rotationDuration then
+                                rotationConnection:Disconnect()
+                                hrp.CFrame = targetInitialCFrame * CFrame.new(0, 0, orbitDistance)
+                                return
+                            end
+                            local currentAngle = elapsedTime * rotationsPerSecond * math.pi * 2
+                            local offsetCFrame = CFrame.new(0, 0, orbitDistance) * CFrame.Angles(0, currentAngle, 0)
+                            hrp.CFrame = targetInitialCFrame * offsetCFrame
+                        end)
+                        Rayfield:Notify({
+                            Title = "Hit From Distance",
+                            Content = "Hitting to closest player!",
+                            Duration = 2
+                        })
+                    else
+                        Rayfield:Notify({
+                            Title = "Hit From Distance",
+                            Content = "No other player found, wierd.",
+                            Duration = 2
+                        })
+                    end
+                end
+            end)
+        else
+            Rayfield:Notify({
+                Title = "Hit From Distance",
+                Content = "Hit From Distance deactivated.",
+                Duration = 3
+            })
+            if mouseClickConnection then
+                mouseClickConnection:Disconnect()
+                mouseClickConnection = nil
+            end
+        end
+    end
+})
+
+Combat_Tab:CreateInput({
+    Name = "Delay (if you have high ping)",
+    Default = "0.2",
+    PlaceholderText = "0.2",
+    Numeric = true,
+    Finished = function(text)
+        local value = tonumber(text)
+        if value ~= nil then
+            teleportDelay = math.max(0, value)
+            Rayfield:Notify({
+                Title = "Delay Updated",
+                Content = "Teleport delay set to " .. string.format("%.2f", teleportDelay) .. " seconds.",
+                Duration = 2
+            })
+        else
+            teleportDelay = 0.2
+            Rayfield:Notify({
+                Title = "Input Error",
+                Content = "Invalid delay value. Reverting to 0.2.",
+                Duration = 3
+            })
+        end
+    end,
+})
+
+-- Helpers Tab Kontrolleri
+Helpers_Tab:CreateToggle({
+    Name = "🚫 Disable Trap Touch Interest",
+    CurrentValue = false,
+    Callback = function(state)
+        trapRemoverEnabled = state
+        if state then
+            task.spawn(function()
+                while trapRemoverEnabled do
+                    local trapOpen = workspace:FindFirstChild("Trap")
+                    if trapOpen then
+                        local touchInterest = trapOpen:FindFirstChild("Open") and trapOpen.Open:FindFirstChild("TouchInterest")
+                        if touchInterest and touchInterest:IsA("TouchTransmitter") then
+                            touchInterest:Destroy()
+                        end
+                    end
+                    task.wait()
+                end
+            end)
+        end
+    end
+})
+
+-- ESP Tab Kontrolleri
+ESP_Tab:CreateToggle({
+    Name = "💰 Stealable ESP",
+    CurrentValue = false,
+    Callback = function(state)
+        stealableESPEnabled = state
+        if not state then
+            clearESPBoxes(activeESPParts)
+        end
+        Rayfield:Notify({
+            Title = "Stealable ESP",
+            Content = state and "Stealable ESP activated." or "Stealable ESP deactivated.",
+            Duration = 3
+        })
+    end
+})
+
+-- Lock Timer ESP Toggle'ı
+ESP_Tab:CreateToggle({
+    Name = "⏱️ Lock Timer ESP",
+    CurrentValue = false,
+    Callback = function(state)
+        lockTimerESPEnabled = state
+        if not state then
+            clearESPBoxes(activeLockTimerESPParts)
+        end
+        Rayfield:Notify({
+            Title = "Lock Timer ESP",
+            Content = state and "Lock Timer ESP activated." or "Lock Timer ESP deactivated.",
+            Duration = 3
+        })
+    end
+})
+
